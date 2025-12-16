@@ -233,9 +233,9 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     const json: any = {
         manifest_version: 3,
         name: localSiteSettings.navTitle || "CloudNav Assistant",
-        version: "1.6", // Bump version to encourage update
+        version: "1.7", // Bump version to force refresh
         description: "CloudNav 侧边栏导航与书签助手",
-        permissions: ["activeTab", "scripting", "sidePanel", "storage", "favicon"], // Removed 'contextMenus'
+        permissions: ["activeTab", "scripting", "sidePanel", "storage", "favicon"],
         background: {
             service_worker: "background.js"
         },
@@ -250,12 +250,26 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
             "128": "icon.png"
         },
         commands: {
+          "_execute_action": {
+            "suggested_key": {
+              "default": "Ctrl+Shift+U",
+              "mac": "Command+Shift+U"
+            },
+            "description": "打开保存弹窗 (Open Save Popup)"
+          },
           "_execute_side_panel": {
             "suggested_key": {
               "default": "Ctrl+Shift+E",
               "mac": "Command+Shift+E"
             },
             "description": "打开/关闭侧边栏 (Toggle Side Panel)"
+          },
+          "open_sidebar_manual": {
+            "suggested_key": {
+              "default": "Ctrl+Shift+L",
+              "mac": "Command+Shift+L"
+            },
+            "description": "打开侧边栏 (备用/Backup Open)"
           }
         }
     };
@@ -273,15 +287,24 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   const extBackgroundJs = `// background.js - CloudNav Assistant
-// 核心逻辑已移至 manifest.json 和 popup/sidebar.js
-// 此文件保留用于 Service Worker 初始化
+
+// 监听备用快捷键命令
+chrome.commands.onCommand.addListener((command) => {
+  if (command === 'open_sidebar_manual') {
+    // 获取当前窗口
+    chrome.windows.getCurrent((window) => {
+      if (window && window.id) {
+        // 使用 open API (注意：此 API 不支持 close/toggle)
+        chrome.sidePanel.open({ windowId: window.id })
+          .catch((error) => console.error("Failed to open side panel:", error));
+      }
+    });
+  }
+});
 
 chrome.runtime.onInstalled.addListener(() => {
   console.log('CloudNav Extension Installed');
 });
-
-// 提示: 侧边栏可以通过快捷键 Ctrl+Shift+E (需要设置) 
-// 或点击 Chrome 工具栏的 "侧边栏" 图标 -> 选择 CloudNav 打开。
 `;
 
   const extPopupHtml = `<!DOCTYPE html>
@@ -1146,12 +1169,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                                 </div>
                                 
                                 <div className="p-3 bg-amber-50 dark:bg-amber-900/20 text-amber-800 dark:text-amber-200 rounded border border-amber-200 dark:border-amber-900/50 text-sm space-y-2">
-                                    <div className="font-bold flex items-center gap-2"><Keyboard size={16}/> 快捷键 Ctrl+Shift+E 设置:</div>
-                                    <p>如果快捷键未生效，请前往 Chrome 快捷键设置 (<code className="bg-white/50 dark:bg-black/20 px-1 rounded">chrome://extensions/shortcuts</code>) 检查。</p>
-                                    <p>务必将快捷键绑定到 <strong>"打开/关闭侧边栏 (Toggle Side Panel)"</strong>。</p>
-                                    <div className="mt-2 pt-2 border-t border-amber-200 dark:border-amber-800/50 text-xs font-semibold text-amber-700 dark:text-amber-300">
-                                        注意：自定义右键菜单已移除。请使用 Chrome 原生的侧边栏按钮或上方快捷键打开。
-                                    </div>
+                                    <div className="font-bold flex items-center gap-2"><Keyboard size={16}/> 快捷键配置:</div>
+                                    <p>如果 <strong>"打开/关闭侧边栏"</strong> 选项未出现，请尝试使用 <strong>"打开侧边栏 (备用)"</strong>。</p>
+                                    <ul className="list-disc list-inside space-y-1 mt-1 text-xs">
+                                        <li><strong>Toggle Side Panel (Ctrl+Shift+E)</strong>: 原生切换 (可能不显示)。</li>
+                                        <li><strong>Backup Open (Ctrl+Shift+L)</strong>: 强制打开 (一定显示)。</li>
+                                    </ul>
                                 </div>
                             </div>
 
