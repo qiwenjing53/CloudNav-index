@@ -232,16 +232,15 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   const getManifestJson = () => {
     const json: any = {
         manifest_version: 3,
-        name: (localSiteSettings.navTitle || "CloudNav") + " Toggle",
-        version: "6.0", 
+        name: (localSiteSettings.navTitle || "CloudNav") + " Pro",
+        version: "7.0", 
         minimum_chrome_version: "116",
-        description: "CloudNav 侧边栏导航 - 一键开关版",
+        description: "CloudNav 侧边栏导航 - 极速响应版",
         permissions: ["activeTab", "scripting", "sidePanel", "storage", "favicon"],
         background: {
             service_worker: "background.js"
         },
-        // 关键改动：移除 default_popup
-        // 这使得点击图标直接触发 action.onClicked 事件，而不是打开弹窗
+        // 关键配置 1: 移除 default_popup，使用 onClicked 事件
         action: {
             default_title: "打开/关闭侧边栏"
         },
@@ -251,15 +250,14 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
         icons: {
             "128": "icon.png"
         },
+        // 关键配置 2: 只保留一个 _execute_action 命令，合并菜单
         commands: {
-          // 这里的 _execute_action 就是用户在快捷键设置里看到的“激活该扩展程序”
-          // 因为我们移除了 popup，所以它现在等同于点击图标
           "_execute_action": {
             "suggested_key": {
               "default": "Ctrl+Shift+E",
               "mac": "Command+Shift+E"
             },
-            "description": "打开/关闭侧边栏 (Toggle Sidebar)"
+            "description": "打开/关闭 CloudNav 侧边栏"
           }
         }
     };
@@ -276,83 +274,71 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     return JSON.stringify(json, null, 2);
   };
 
-  const extBackgroundJs = `// background.js - CloudNav Assistant v6.0 (Action Toggle Mode)
+  const extBackgroundJs = `// background.js - CloudNav Assistant v7.0 (Architecture by 115)
 
-// 跟踪所有当前已打开侧边栏的窗口 ID
-const openWindows = new Set();
+// 存储当前所有打开的侧边栏端口连接
+// Key: windowId (数字), Value: Port 对象
+const windowPorts = {};
 
-// 1. 监听来自侧边栏的连接，用于精准追踪状态
+// 1. 监听来自侧边栏的连接 (侧边栏打开时会自动连接)
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name === 'cloudnav_sidebar') {
-    // 侧边栏打开时，记录窗口 ID
-    if (port.sender && port.sender.tab && port.sender.tab.windowId) {
-       const winId = port.sender.tab.windowId;
-       openWindows.add(winId);
-       
-       port.onDisconnect.addListener(() => {
-          openWindows.delete(winId);
-          console.log('Sidebar closed for window:', winId);
-       });
-       console.log('Sidebar opened for window:', winId);
-    } 
-  }
+  if (port.name !== 'cloudnav_sidebar') return;
+
+  // 监听侧边栏发来的初始化消息，获取它所在的 windowId
+  port.onMessage.addListener((msg) => {
+    if (msg.type === 'init' && msg.windowId) {
+      console.log('Sidebar connected for window:', msg.windowId);
+      windowPorts[msg.windowId] = port;
+
+      // 当侧边栏断开连接（被手动关闭或窗口关闭）时，清理记录
+      port.onDisconnect.addListener(() => {
+        console.log('Sidebar disconnected for window:', msg.windowId);
+        if (windowPorts[msg.windowId] === port) {
+          delete windowPorts[msg.windowId];
+        }
+      });
+    }
+  });
 });
 
-// 2. 核心逻辑：点击图标（或按 _execute_action 快捷键）时触发
+// 2. 监听图标点击（或快捷键触发）
 chrome.action.onClicked.addListener(async (tab) => {
     const windowId = tab.windowId;
-    const isOpen = openWindows.has(windowId);
+    const existingPort = windowPorts[windowId];
 
-    if (isOpen) {
-        // 【关闭逻辑】: 利用 API 瞬间禁用再启用
-        console.log('Toggling OFF for window', windowId);
-        
-        await chrome.sidePanel.setOptions({
-            windowId: windowId,
-            enabled: false
-        });
-        
-        openWindows.delete(windowId);
-
-        // 稍微延迟后重新启用，以便下次可以打开
-        setTimeout(() => {
-            chrome.sidePanel.setOptions({
-                windowId: windowId,
-                enabled: true,
-                path: 'sidebar.html'
-            });
-        }, 100);
-
+    if (existingPort) {
+        // 【关闭逻辑】：如果端口存在，说明侧边栏是打开的
+        // 发送消息给侧边栏，让它自己调用 window.close()
+        console.log('Toggle: Closing sidebar for window', windowId);
+        try {
+            existingPort.postMessage({ action: 'close_panel' });
+        } catch (e) {
+            console.error('Failed to send close message', e);
+            // 如果发送失败，强制清理并尝试重新打开（容错）
+            delete windowPorts[windowId];
+            chrome.sidePanel.open({ windowId });
+        }
     } else {
-        // 【打开逻辑】
-        console.log('Toggling ON for window', windowId);
-        
-        // 确保启用
-        await chrome.sidePanel.setOptions({
-            windowId: windowId,
-            enabled: true,
-            path: 'sidebar.html'
-        });
-
-        // 打开
-        await chrome.sidePanel.open({ windowId: windowId });
+        // 【打开逻辑】：端口不存在，直接打开
+        console.log('Toggle: Opening sidebar for window', windowId);
+        try {
+            await chrome.sidePanel.open({ windowId: windowId });
+        } catch (e) {
+            console.error('Failed to open sidebar', e);
+        }
     }
 });
 
-// 初始化：确保全局启用
+// 初始化设置
 chrome.runtime.onInstalled.addListener(() => {
-  // 设置行为为点击图标不打开 Panel (而是触发 onClicked)
+  // 确保点击图标不会默认打开侧边栏 (我们要自己控制)
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false })
     .catch(console.error);
-    
-  chrome.sidePanel.setOptions({ enabled: true, path: 'sidebar.html' });
 });
 `;
 
-  // Popup 相关的代码虽然不再直接被 Action 使用，但为了文件完整性保留
-  // 实际上它现在是“孤儿”文件，但不会影响功能
-  const extPopupHtml = `<!DOCTYPE html>
-<html><body>Popup Unused in v6.0</body></html>`;
+  // Popup 不再使用
+  const extPopupHtml = `<!DOCTYPE html><html><body>Popup Unused in v7.0</body></html>`;
   const extPopupJs = `// Unused`;
 
   const extSidebarHtml = `<!DOCTYPE html>
@@ -436,13 +422,30 @@ chrome.runtime.onInstalled.addListener(() => {
 };
 const CACHE_KEY = 'cloudnav_data';
 
-// 建立连接以告知 background script 侧边栏已打开
-// 这是实现“智能开关”的关键
+// --- 核心改动：连接与自关闭逻辑 (参考 115) ---
+let port = null;
 try {
-    chrome.runtime.connect({ name: 'cloudnav_sidebar' });
+    // 1. 建立长连接
+    port = chrome.runtime.connect({ name: 'cloudnav_sidebar' });
+    
+    // 2. 获取当前窗口ID并发送给后台，建立绑定关系
+    chrome.windows.getCurrent((win) => {
+        if (win && port) {
+            port.postMessage({ type: 'init', windowId: win.id });
+        }
+    });
+
+    // 3. 监听关闭指令
+    port.onMessage.addListener((msg) => {
+        if (msg.action === 'close_panel') {
+            console.log('Received close command, closing window.');
+            window.close(); // 只有在扩展页面内部调用有效
+        }
+    });
 } catch(e) {
-    console.log('Connect failed', e);
+    console.error('Connection failed', e);
 }
+// ----------------------------------------
 
 document.addEventListener('DOMContentLoaded', async () => {
     const container = document.getElementById('content');
@@ -1013,7 +1016,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                                     安装指南 ({browserType === 'chrome' ? 'Chrome/Edge' : 'Firefox'}):
                                 </h5>
                                 <ol className="list-decimal list-inside text-sm text-slate-600 dark:text-slate-400 space-y-2 leading-relaxed">
-                                    <li>在电脑上新建文件夹 <code className="bg-white dark:bg-slate-900 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 font-mono text-xs">CloudNav-Toggle</code>。</li>
+                                    <li>在电脑上新建文件夹 <code className="bg-white dark:bg-slate-900 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 font-mono text-xs">CloudNav-Pro</code>。</li>
                                     <li><strong>[重要]</strong> 将下方图标保存为 <code className="bg-white dark:bg-slate-900 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 font-mono text-xs">icon.png</code>。</li>
                                     <li>在文件夹中创建以下文件。<span className="text-red-500 dark:text-red-400 font-bold"> 请务必点击下方按钮一键下载并覆盖旧文件。</span></li>
                                     <li>
@@ -1028,7 +1031,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                                     <li>1. 移除旧插件，重启浏览器。</li>
                                     <li>2. 加载新版插件。</li>
                                     <li>3. 前往快捷键设置页 <code className="select-all bg-white dark:bg-slate-900 px-1 rounded">chrome://extensions/shortcuts</code>。</li>
-                                    <li>4. <strong className="text-red-500">关键：</strong>您现在只会看到“打开/关闭侧边栏”一个选项。请将它绑定为常用快捷键 (如 Ctrl+Shift+E)。</li>
+                                    <li>4. <strong className="text-red-500">关键：</strong>您现在只会看到“打开/关闭 CloudNav 侧边栏”一个选项。请将它绑定为常用快捷键 (如 Ctrl+Shift+E)。</li>
                                 </ol>
                                 
                                 <div className="mt-4 mb-4">
@@ -1038,13 +1041,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                                         className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-70 disabled:cursor-not-allowed text-white font-bold py-3 px-4 rounded-xl transition-colors shadow-lg shadow-blue-500/20"
                                     >
                                         <Package size={20} />
-                                        {isZipping ? '打包中...' : '📦 一键下载所有文件 (v6.0 Toggle)'}
+                                        {isZipping ? '打包中...' : '📦 一键下载所有文件 (v7.0 Pro)'}
                                     </button>
                                 </div>
                                 
                                 <div className="p-3 bg-amber-50 dark:bg-amber-900/20 text-amber-800 dark:text-amber-200 rounded border border-amber-200 dark:border-amber-900/50 text-sm space-y-2">
-                                    <div className="font-bold flex items-center gap-2"><Keyboard size={16}/> 原理说明:</div>
-                                    <p>此版本移除了默认弹窗行为，将插件图标点击事件直接转换为“开关侧边栏”指令。这解决了快捷键冲突问题，让您可以直接使用主快捷键控制侧边栏。</p>
+                                    <div className="font-bold flex items-center gap-2"><Keyboard size={16}/> 115 同款方案:</div>
+                                    <p>此版本使用了 115 扩展的通信架构：后台脚本通过长连接检测侧边栏状态，并发送指令让侧边栏自行关闭。这是最稳定、兼容性最好的方案。</p>
                                 </div>
                             </div>
 
